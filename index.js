@@ -46,6 +46,7 @@ async function run() {
     try {
         const database = client.db("easy-cash");
         const usersCollection = database.collection('users');
+        const transactionCollection = database.collection('transactions');
 
         // Admin verification middleware
         const verifyAdmin = async (req, res, next) => {
@@ -60,6 +61,13 @@ async function run() {
             next();
         }
 
+        // check whether a user is a normal user
+        app.get("/is-user", verifyToken, async (req, res) => {
+            const email = req.user.email;
+            const result = await usersCollection.findOne({ email });
+            res.send({ isUser: result?.role === 3 })
+        })
+
         // keeping seperate for reusing purpose
         const jwtInit = (req, res) => {
             const user = req.body;
@@ -71,23 +79,84 @@ async function run() {
             });
         }
 
+        // Send money operation
+        app.post("/send-money", verifyToken, async (req, res) => {
+            const email = req.user.email;
+            const recipient = req.body.recipient;
+            const charge = amount < 100 ? 0 : 5;
+            const amount = parseInt(req.body.amount) + charge;
+
+            const getRecipient = await usersCollection.findOne({ mobile: recipient });
+            if (!getRecipient || email === getRecipient.email) {
+                return res.send({ err: true, message: "Invalid recipient" });
+            }
+
+            if (getRecipient.ac_type !== 'user') {
+                return res.send({ err: true, message: "Only users all allowed to be recipient!" });
+            }
+
+            const getSender = await usersCollection.findOne({ email });
+            if (getSender.balance < amount) {
+                return res.send({ err: true, message: "Insufficient balance!" });
+            }
+
+            await usersCollection.updateOne({ email }, {
+                $inc: {
+                    balance: - amount
+                }
+            });
+
+            await usersCollection.updateOne({ mobile: recipient }, {
+                $inc: {
+                    balance: amount - charge
+                }
+            })
+
+            charge > 0 && await usersCollection.updateOne({ role: 1 }, {
+                $inc: {
+                    balance: 5
+                }
+            })
+
+            const salt = bcrypt.genSaltSync(10);
+            const date = Date.now();
+            const trxId = bcrypt.hashSync(date.toString(), salt);
+            const transaction = {
+                type: 'send-money',
+                amount: amount - 5,
+                charge: 5,
+                sender: email,
+                recipient: getRecipient.email,
+                date,
+                trxId
+            }
+
+            const result = await transactionCollection.insertOne(transaction);
+
+            res.send({ ...result, trxId });
+        })
+
         // Save credentials in database after sign up
         app.post('/create-user', async (req, res) => {
             const data = req.body;
-            const emailQuery = {email: data.email}
-            const mobileQuery = {mobile: data.mobile}
-            const nidQuery = {nid: data.nid}
+            const emailQuery = { email: data.email }
+            const mobileQuery = { mobile: data.mobile }
+            const nidQuery = { nid: data.nid }
 
             const emailRes = await usersCollection.findOne(emailQuery);
-            if(emailRes)return res.send({err: true, duplicateEmail: true})
-                
-            const mobileRes = await usersCollection.findOne(mobileQuery);
-            if(mobileRes)return res.send({err: true, duplicateMobile: true})
-                
-            const nidRes = await usersCollection.findOne(nidQuery);
-            if(nidRes)return res.send({err: true, duplicateNid: true})
+            if (emailRes) return res.send({ err: true, duplicateEmail: true })
 
-            data.role = data.ac_type === 'user' ? 3 : 2;
+            const mobileRes = await usersCollection.findOne(mobileQuery);
+            if (mobileRes) return res.send({ err: true, duplicateMobile: true })
+
+            const nidRes = await usersCollection.findOne(nidQuery);
+            if (nidRes) return res.send({ err: true, duplicateNid: true })
+
+            const isUser = data.ac_type === 'user';
+            data.role = isUser ? 3 : 2;
+            data.balance = isUser ? 40 : 100000;
+
+            data.status = isUser ? 'active' : 'pending';
 
             const salt = bcrypt.genSaltSync(10);
             data.pin = bcrypt.hashSync(data.pin, salt);

@@ -83,11 +83,14 @@ async function run() {
         app.post("/send-money", verifyToken, async (req, res) => {
             const email = req.user.email;
             const recipient = req.body.recipient;
-            const charge = amount < 100 ? 0 : 5;
-            const amount = parseInt(req.body.amount) + charge;
+            const _amount = parseInt(req.body.amount);
+            const charge = _amount < 100 ? 0 : 5;
+            const amount = _amount + charge;
 
             const getRecipient = await usersCollection.findOne({ mobile: recipient });
-            if (!getRecipient || email === getRecipient.email) {
+
+            // checking whether both sender and reciver are same or not
+            if (!getRecipient || email===getRecipient.email) {
                 return res.send({ err: true, message: "Invalid recipient" });
             }
 
@@ -127,6 +130,66 @@ async function run() {
                 charge: 5,
                 sender: email,
                 recipient: getRecipient.email,
+                date,
+                trxId
+            }
+
+            const result = await transactionCollection.insertOne(transaction);
+
+            res.send({ ...result, trxId });
+        })
+
+        // Cash out operation
+        app.post("/cash-out", verifyToken, async(req, res)=>{
+            const email = req.user.email;
+            const agent = req.body.agent;
+
+            const _amount = parseInt(req.body.amount);
+            const charge = _amount * (1.5/100);
+            const amount = _amount + charge;
+            
+            const getAgent = await usersCollection.findOne({ mobile: agent });
+            if (!getAgent || getAgent?.ac_type!=='agent') {
+                return res.send({ err: true, message: "Invalid agent!" });
+            }
+
+            const getUser = await usersCollection.findOne({ email });
+            if (getUser.balance < amount) {
+                return res.send({ err: true, message: "Insufficient balance!" });
+            }
+
+            const isPinOk = await bcrypt.compare(req.body.pin, getUser.pin);
+            if(!isPinOk){
+                return res.send({ err: true, message: "Incorrect Pin!" });
+            }
+
+            await usersCollection.updateOne({ email }, {
+                $inc: {
+                    balance: - amount
+                }
+            });
+
+            await usersCollection.updateOne({ mobile: agent }, {
+                $inc: {
+                    balance: _amount + (_amount * (1/100))
+                }
+            })
+
+            await usersCollection.updateOne({ role: 1 }, {
+                $inc: {
+                    balance: _amount * (.5/100)
+                }
+            })
+
+            const salt = bcrypt.genSaltSync(10);
+            const date = Date.now();
+            const trxId = bcrypt.hashSync(date.toString(), salt);
+            const transaction = {
+                type: 'cash-out',
+                amount: _amount,
+                charge,
+                from: email,
+                to: agent.email,
                 date,
                 trxId
             }
@@ -176,10 +239,12 @@ async function run() {
             const isPinOk = await bcrypt.compare(pin, result.pin);
             if (!isPinOk) return res.send(inValidMsg);
 
-            delete result.pin;
+            if(result.ac_type==='agent' && result.status!=='approved'){
+                return res.send({isUnderReview: true, message: "Your account is under review"});
+            }
 
+            delete result.pin;
             jwtInit(req, res).send(result);
-            // res.send(result);
         })
 
         // Create JWT after sign in

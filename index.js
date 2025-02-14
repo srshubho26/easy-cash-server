@@ -52,7 +52,7 @@ async function run() {
         const verifyAdmin = async (req, res, next) => {
             const query = {
                 email: req.user.email,
-                role: 0
+                role: 1
             }
             const result = await usersCollection.findOne(query);
             if (!result) {
@@ -60,6 +60,47 @@ async function run() {
             }
             next();
         }
+
+        // blocking and unblocking account
+        app.patch("/account-restriction/", verifyToken, verifyAdmin, async (req, res) => {
+            const action = req.body.action;
+            const email = req.body.email;
+
+            const result = await usersCollection.updateOne({ email }, {
+                $set: {
+                    status: action
+                }
+            })
+
+            res.send(result);
+        })
+
+        // Loading accounts (users/agents)
+        app.get("/accounts", verifyToken, verifyAdmin, async (req, res) => {
+            const type = req.query.type;
+            const mobile = req?.query?.phone;
+            const query = { ac_type: type };
+            if (mobile) query.mobile = mobile;
+
+            const cursor = usersCollection.find(query);
+            const result = await cursor.toArray();
+            res.send(result);
+        })
+
+        // View transaction by admin
+        app.get("/transactions", verifyToken, verifyAdmin, async (req, res) => {
+            const email = req.query.email;
+            const cursor = transactionCollection.find({ $or: [{ from: email }, { to: email }] });
+            const result = await cursor.toArray();
+            res.send(result);
+        })
+
+        // check whether a user is a an agent
+        app.get("/is-admin", verifyToken, async (req, res) => {
+            const email = req.user.email;
+            const result = await usersCollection.findOne({ email });
+            res.send({ isAdmin: result?.role === 1 })
+        })
 
         // check whether a user is a an agent
         app.get("/is-agent", verifyToken, async (req, res) => {
@@ -97,7 +138,7 @@ async function run() {
             const getRecipient = await usersCollection.findOne({ mobile: recipient });
 
             // checking whether both sender and reciver are same or not
-            if (!getRecipient || email===getRecipient.email) {
+            if (!getRecipient || email === getRecipient.email) {
                 return res.send({ err: true, message: "Invalid recipient" });
             }
 
@@ -147,14 +188,14 @@ async function run() {
         })
 
         // Cash in operation
-        app.post("/cash-in", verifyToken, async(req, res)=>{
+        app.post("/cash-in", verifyToken, async (req, res) => {
             const email = req.user.email;
             const user = req.body.user;
 
             const amount = parseInt(req.body.amount);
-            
+
             const getUser = await usersCollection.findOne({ mobile: user });
-            if (!getUser || getUser?.ac_type!=='user') {
+            if (!getUser || getUser?.ac_type !== 'user') {
                 return res.send({ err: true, message: "Invalid agent!" });
             }
 
@@ -164,7 +205,7 @@ async function run() {
             }
 
             const isPinOk = await bcrypt.compare(req.body.pin, getAgent.pin);
-            if(!isPinOk){
+            if (!isPinOk) {
                 return res.send({ err: true, message: "Incorrect Pin!" });
             }
 
@@ -176,7 +217,7 @@ async function run() {
 
             await usersCollection.updateOne({ mobile: getUser.mobile }, {
                 $inc: {
-                    balance: amount 
+                    balance: amount
                 }
             })
 
@@ -199,16 +240,16 @@ async function run() {
         })
 
         // Cash out operation
-        app.post("/cash-out", verifyToken, async(req, res)=>{
+        app.post("/cash-out", verifyToken, async (req, res) => {
             const email = req.user.email;
             const agent = req.body.agent;
 
             const _amount = parseInt(req.body.amount);
-            const charge = _amount * (1.5/100);
+            const charge = _amount * (1.5 / 100);
             const amount = _amount + charge;
-            
+
             const getAgent = await usersCollection.findOne({ mobile: agent });
-            if (!getAgent || getAgent?.ac_type!=='agent' || getAgent?.status!=='approved') {
+            if (!getAgent || getAgent?.ac_type !== 'agent' || getAgent?.status !== 'approved') {
                 return res.send({ err: true, message: "Invalid agent!" });
             }
 
@@ -218,7 +259,7 @@ async function run() {
             }
 
             const isPinOk = await bcrypt.compare(req.body.pin, getUser.pin);
-            if(!isPinOk){
+            if (!isPinOk) {
                 return res.send({ err: true, message: "Incorrect Pin!" });
             }
 
@@ -230,14 +271,14 @@ async function run() {
 
             await usersCollection.updateOne({ mobile: agent }, {
                 $inc: {
-                    balance: _amount + (_amount * (1/100)),
-                    income: _amount * (1/100)
+                    balance: _amount + (_amount * (1 / 100)),
+                    income: _amount * (1 / 100)
                 }
             })
 
             await usersCollection.updateOne({ role: 1 }, {
                 $inc: {
-                    balance: _amount * (.5/100)
+                    balance: _amount * (.5 / 100)
                 }
             })
 
@@ -260,9 +301,9 @@ async function run() {
         })
 
         // balance inquiry
-        app.get("/balance", verifyToken, async(req, res)=>{
+        app.get("/balance", verifyToken, async (req, res) => {
             const email = req.user.email;
-            const result = await usersCollection.findOne({email}, {
+            const result = await usersCollection.findOne({ email }, {
                 projection: {
                     balance: 1
                 }
@@ -312,8 +353,12 @@ async function run() {
             const isPinOk = await bcrypt.compare(pin, result.pin);
             if (!isPinOk) return res.send(inValidMsg);
 
-            if(result.ac_type==='agent' && result.status!=='approved'){
-                return res.send({isUnderReview: true, message: "Your account is under review"});
+            if (result.ac_type === 'agent' && result.status !== 'approved') {
+                return res.send({ restricted: true, message: "Your account is under review" });
+            }
+
+            if (result.status === 'blocked') {
+                return res.send({ restricted: true, message: "Your account is temporarily blocked!" });
             }
 
             delete result.pin;

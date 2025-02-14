@@ -47,6 +47,8 @@ async function run() {
         const database = client.db("easy-cash");
         const usersCollection = database.collection('users');
         const transactionCollection = database.collection('transactions');
+        const moneyRequestsCollection = database.collection('money-requests');
+        const withdrawRequestCollection = database.collection('withdraw-requests');
 
         // Admin verification middleware
         const verifyAdmin = async (req, res, next) => {
@@ -79,8 +81,10 @@ async function run() {
         app.get("/accounts", verifyToken, verifyAdmin, async (req, res) => {
             const type = req.query.type;
             const mobile = req?.query?.phone;
+            const status = req?.query?.status;
             const query = { ac_type: type };
             if (mobile) query.mobile = mobile;
+            if(status)query.status = status;
 
             const cursor = usersCollection.find(query);
             const result = await cursor.toArray();
@@ -91,6 +95,16 @@ async function run() {
         app.get("/transactions", verifyToken, verifyAdmin, async (req, res) => {
             const email = req.query.email;
             const cursor = transactionCollection.find({ $or: [{ from: email }, { to: email }] });
+            const result = await cursor.toArray();
+            res.send(result);
+        })
+
+        // View own transactions
+        app.get("/my-transactions", verifyToken, async (req, res) => {
+            const email = req.user.email;
+            const cursor = transactionCollection.find({ $or: [{ from: email }, { to: email }] }).sort({
+                date: -1
+            }).limit(100);
             const result = await cursor.toArray();
             res.send(result);
         })
@@ -300,6 +314,81 @@ async function run() {
             res.send({ ...result, trxId });
         })
 
+        // Load money requests by admin
+        app.get("/money-requests", verifyToken, verifyAdmin, async(req, res)=>{
+            const result = await moneyRequestsCollection.find().toArray();
+            res.send(result);
+        })
+
+        // accept money request
+        app.patch("/approve-money-request", verifyToken, verifyAdmin, async(req, res)=>{
+            const _id = new ObjectId(req.body.id);
+            const email = req.body.email;
+
+            await usersCollection.updateOne({email}, {
+                $inc: {
+                    balance: 100000
+                }
+            })
+        
+            const result = await moneyRequestsCollection.updateOne({_id}, {
+                $set: {
+                    status: 'approved'
+                }
+            })
+            
+            res.send(result);
+        })
+
+        // approve with requst
+        app.patch("/approve-withdraw-request", verifyToken, verifyAdmin, async(req, res)=>{
+            const _id = new ObjectId(req.body.id);
+            const email = req.body.email;
+            const amount = parseInt(req.body.amount)
+
+            await usersCollection.updateOne({email}, {
+                $inc: {
+                    balance: -amount
+                }
+            })
+        
+            const result = await withdrawRequestCollection.updateOne({_id}, {
+                $set: {
+                    status: 'approved'
+                }
+            })
+            
+            res.send(result);
+        })
+
+        // load withdraw requests
+        app.get("/withdraw-requests", verifyToken, verifyAdmin, async(req, res)=>{
+            const result = await withdrawRequestCollection.find().toArray();
+            res.send(result);
+        })
+
+        // send withdraw request
+        app.post("/withdraw-request", verifyToken, async(req, res)=>{
+            const email = req.user.email;
+            const amount = parseInt(req.body.amount);
+            const getAgent = await usersCollection.findOne({email}, {projection: {balance: 1}});
+            if(getAgent.balance<amount){
+                return res.send({err: true, message: "Insufficient Balance!"});
+            }
+            const result = await withdrawRequestCollection.insertOne({requestedBy: email, amount, status: 'pending'})
+            res.send(result);
+        })
+
+        // Request for money by agent to admin
+        app.post("/request-money", verifyToken, async(req, res)=>{
+            const email = req.user.email;
+            const result = await moneyRequestsCollection.insertOne({
+                requestedBy: email,
+                status: 'pending'
+            })
+            res.send(result);
+        })
+
         // balance inquiry
         app.get("/balance", verifyToken, async (req, res) => {
             const email = req.user.email;
@@ -353,12 +442,16 @@ async function run() {
             const isPinOk = await bcrypt.compare(pin, result.pin);
             if (!isPinOk) return res.send(inValidMsg);
 
-            if (result.ac_type === 'agent' && result.status !== 'approved') {
+            if (result.ac_type === 'agent' && result.status === 'pending') {
                 return res.send({ restricted: true, message: "Your account is under review" });
             }
 
             if (result.status === 'blocked') {
                 return res.send({ restricted: true, message: "Your account is temporarily blocked!" });
+            }
+
+            if (result.status === 'rejected') {
+                return res.send({ restricted: true, message: "Your account is rejected!" });
             }
 
             delete result.pin;

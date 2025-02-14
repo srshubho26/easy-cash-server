@@ -149,7 +149,7 @@ async function run() {
             const amount = _amount + charge;
             
             const getAgent = await usersCollection.findOne({ mobile: agent });
-            if (!getAgent || getAgent?.ac_type!=='agent') {
+            if (!getAgent || getAgent?.ac_type!=='agent' || getAgent?.status!=='approved') {
                 return res.send({ err: true, message: "Invalid agent!" });
             }
 
@@ -171,7 +171,8 @@ async function run() {
 
             await usersCollection.updateOne({ mobile: agent }, {
                 $inc: {
-                    balance: _amount + (_amount * (1/100))
+                    balance: _amount + (_amount * (1/100)),
+                    income: _amount * (1/100)
                 }
             })
 
@@ -199,6 +200,18 @@ async function run() {
             res.send({ ...result, trxId });
         })
 
+        // balance inquiry
+        app.get("/balance", verifyToken, async(req, res)=>{
+            const email = req.user.email;
+            const result = await usersCollection.findOne({email}, {
+                projection: {
+                    balance: 1
+                }
+            });
+
+            res.send(result)
+        })
+
         // Save credentials in database after sign up
         app.post('/create-user', async (req, res) => {
             const data = req.body;
@@ -218,6 +231,7 @@ async function run() {
             const isUser = data.ac_type === 'user';
             data.role = isUser ? 3 : 2;
             data.balance = isUser ? 40 : 100000;
+            !isUser && (data.income = 0);
 
             data.status = isUser ? 'active' : 'pending';
 

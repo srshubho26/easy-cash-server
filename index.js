@@ -61,6 +61,13 @@ async function run() {
             next();
         }
 
+        // check whether a user is a an agent
+        app.get("/is-agent", verifyToken, async (req, res) => {
+            const email = req.user.email;
+            const result = await usersCollection.findOne({ email });
+            res.send({ isAgent: result?.role === 2 })
+        })
+
         // check whether a user is a normal user
         app.get("/is-user", verifyToken, async (req, res) => {
             const email = req.user.email;
@@ -130,6 +137,58 @@ async function run() {
                 charge: 5,
                 sender: email,
                 recipient: getRecipient.email,
+                date,
+                trxId
+            }
+
+            const result = await transactionCollection.insertOne(transaction);
+
+            res.send({ ...result, trxId });
+        })
+
+        // Cash in operation
+        app.post("/cash-in", verifyToken, async(req, res)=>{
+            const email = req.user.email;
+            const user = req.body.user;
+
+            const amount = parseInt(req.body.amount);
+            
+            const getUser = await usersCollection.findOne({ mobile: user });
+            if (!getUser || getUser?.ac_type!=='user') {
+                return res.send({ err: true, message: "Invalid agent!" });
+            }
+
+            const getAgent = await usersCollection.findOne({ email });
+            if (getAgent.balance < amount) {
+                return res.send({ err: true, message: "Insufficient balance!" });
+            }
+
+            const isPinOk = await bcrypt.compare(req.body.pin, getAgent.pin);
+            if(!isPinOk){
+                return res.send({ err: true, message: "Incorrect Pin!" });
+            }
+
+            await usersCollection.updateOne({ email }, {
+                $inc: {
+                    balance: - amount
+                }
+            });
+
+            await usersCollection.updateOne({ mobile: getUser.mobile }, {
+                $inc: {
+                    balance: amount 
+                }
+            })
+
+            const salt = bcrypt.genSaltSync(10);
+            const date = Date.now();
+            const trxId = bcrypt.hashSync(date.toString(), salt);
+            const transaction = {
+                type: 'cash-in',
+                amount: amount,
+                charge: 0,
+                from: email,
+                to: getUser.email,
                 date,
                 trxId
             }

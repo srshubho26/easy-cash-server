@@ -20,27 +20,14 @@ const client = new MongoClient(uri, {
 // Middleware
 app.use(cors({
     origin: [
-        "http://localhost:5173"
+        "http://localhost:5173",
+        "https://easy-cash-19352.web.app",
+        "https://easy-cash-19352.firebaseapp.com"
     ],
     credentials: true
 }));
 app.use(express.json());
 app.use(cookieParser());
-
-const verifyToken = (req, res, next) => {
-    const token = req.cookies?.token;
-    if (!token) {
-        return res.status(401).send({ message: 'Unauthorized' })
-    }
-
-    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-        if (err) {
-            return res.status(401).send({ message: 'Unauthorized' })
-        }
-        req.user = decoded;
-        next();
-    })
-}
 
 async function run() {
     try {
@@ -63,15 +50,43 @@ async function run() {
             next();
         }
 
+
+        const verifyToken = (req, res, next) => {
+            const token = req.cookies?.token;
+            if (!token) {
+                return res.status(401).send({ message: 'Unauthorized' })
+            }
+
+            jwt.verify(token, process.env.JWT_SECRET, async (err, decoded) => {
+                if (err) {
+                    return res.status(401).send({ message: 'Unauthorized' })
+                }
+                const user = decoded;
+
+                const query = { email: user.email }
+                const result = await usersCollection.findOne(query);
+                if (!result || token !== result?.token) {
+
+                    return res.clearCookie('token', {
+                        httpOnly: true,
+                        secure: process.env.NODE_ENV === 'production',
+                        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict'
+                    }).status(404).send({ message: 'Unauthenticated' });
+                }
+                req.user = user;
+                next();
+            })
+        }
+
         // blocking and unblocking account
         app.patch("/account-restriction/", verifyToken, verifyAdmin, async (req, res) => {
             const action = req.body.action;
             const email = req.body.email;
+            const doc = {status: action}
+            if(action==='blocked')doc.token = "";
 
             const result = await usersCollection.updateOne({ email }, {
-                $set: {
-                    status: action
-                }
+                $set: {...doc}
             })
 
             res.send(result);
@@ -84,7 +99,7 @@ async function run() {
             const status = req?.query?.status;
             const query = { ac_type: type };
             if (mobile) query.mobile = mobile;
-            if(status)query.status = status;
+            if (status) query.status = status;
 
             const cursor = usersCollection.find(query);
             const result = await cursor.toArray();
@@ -94,7 +109,9 @@ async function run() {
         // View transaction by admin
         app.get("/transactions", verifyToken, verifyAdmin, async (req, res) => {
             const email = req.query.email;
-            const cursor = transactionCollection.find({ $or: [{ from: email }, { to: email }] });
+            const cursor = transactionCollection.find({ $or: [{ from: email }, { to: email }] }).sort({
+                date: -1
+            });
             const result = await cursor.toArray();
             res.send(result);
         })
@@ -125,15 +142,23 @@ async function run() {
 
         // check whether a user is a normal user
         app.get("/is-user", verifyToken, async (req, res) => {
-            const email = req.user.email;
+            const email = req?.user?.email;
             const result = await usersCollection.findOne({ email });
             res.send({ isUser: result?.role === 3 })
         })
 
         // keeping seperate for reusing purpose
-        const jwtInit = (req, res) => {
+        const jwtInit = async (req, res) => {
             const user = req.body;
+            delete user.pin;
             const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: '5h' });
+
+            await usersCollection.updateOne({ email: user.email }, {
+                $set: {
+                    token
+                }
+            })
+
             return res.cookie('token', token, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
@@ -151,8 +176,8 @@ async function run() {
 
             const getRecipient = await usersCollection.findOne({ mobile: recipient });
 
-            // checking whether both sender and reciver are same or not
-            if (!getRecipient || email === getRecipient.email) {
+            // (email === getRecipient.email) checking whether both sender and reciver are same or not
+            if (!getRecipient || email === getRecipient.email || getRecipient.status !== 'active') {
                 return res.send({ err: true, message: "Invalid recipient" });
             }
 
@@ -179,7 +204,8 @@ async function run() {
 
             charge > 0 && await usersCollection.updateOne({ role: 1 }, {
                 $inc: {
-                    balance: 5
+                    balance: charge,
+                    system_balance: amount
                 }
             })
 
@@ -190,8 +216,8 @@ async function run() {
                 type: 'send-money',
                 amount: amount - 5,
                 charge: 5,
-                sender: email,
-                recipient: getRecipient.email,
+                from: email,
+                to: getRecipient.email,
                 date,
                 trxId
             }
@@ -209,8 +235,8 @@ async function run() {
             const amount = parseInt(req.body.amount);
 
             const getUser = await usersCollection.findOne({ mobile: user });
-            if (!getUser || getUser?.ac_type !== 'user') {
-                return res.send({ err: true, message: "Invalid agent!" });
+            if (!getUser || getUser?.ac_type !== 'user' || getUser?.status !== 'active') {
+                return res.send({ err: true, message: "Invalid user!" });
             }
 
             const getAgent = await usersCollection.findOne({ email });
@@ -232,6 +258,12 @@ async function run() {
             await usersCollection.updateOne({ mobile: getUser.mobile }, {
                 $inc: {
                     balance: amount
+                }
+            })
+
+            await usersCollection.updateOne({ role: 1 }, {
+                $inc: {
+                    system_balance: amount
                 }
             })
 
@@ -263,7 +295,7 @@ async function run() {
             const amount = _amount + charge;
 
             const getAgent = await usersCollection.findOne({ mobile: agent });
-            if (!getAgent || getAgent?.ac_type !== 'agent' || getAgent?.status !== 'approved') {
+            if (!getAgent || getAgent?.ac_type !== 'agent' || getAgent?.status !== 'active') {
                 return res.send({ err: true, message: "Invalid agent!" });
             }
 
@@ -292,7 +324,8 @@ async function run() {
 
             await usersCollection.updateOne({ role: 1 }, {
                 $inc: {
-                    balance: _amount * (.5 / 100)
+                    balance: _amount * (.5 / 100),
+                    system_balance: amount
                 }
             })
 
@@ -304,7 +337,7 @@ async function run() {
                 amount: _amount,
                 charge,
                 from: email,
-                to: agent.email,
+                to: getAgent.email,
                 date,
                 trxId
             }
@@ -315,72 +348,80 @@ async function run() {
         })
 
         // Load money requests by admin
-        app.get("/money-requests", verifyToken, verifyAdmin, async(req, res)=>{
+        app.get("/money-requests", verifyToken, verifyAdmin, async (req, res) => {
             const result = await moneyRequestsCollection.find().toArray();
             res.send(result);
         })
 
         // accept money request
-        app.patch("/approve-money-request", verifyToken, verifyAdmin, async(req, res)=>{
+        app.patch("/approve-money-request", verifyToken, verifyAdmin, async (req, res) => {
             const _id = new ObjectId(req.body.id);
             const email = req.body.email;
 
-            await usersCollection.updateOne({email}, {
+            await usersCollection.updateOne({ email }, {
                 $inc: {
                     balance: 100000
                 }
+            });
+
+            await usersCollection.updateOne({role: 1}, {
+                $inc: {system_balance: 100000}
             })
-        
-            const result = await moneyRequestsCollection.updateOne({_id}, {
+
+            const result = await moneyRequestsCollection.updateOne({ _id }, {
                 $set: {
                     status: 'approved'
                 }
             })
-            
+
             res.send(result);
         })
 
         // approve with requst
-        app.patch("/approve-withdraw-request", verifyToken, verifyAdmin, async(req, res)=>{
+        app.patch("/approve-withdraw-request", verifyToken, verifyAdmin, async (req, res) => {
             const _id = new ObjectId(req.body.id);
             const email = req.body.email;
             const amount = parseInt(req.body.amount)
 
-            await usersCollection.updateOne({email}, {
+            await usersCollection.updateOne({ email }, {
                 $inc: {
                     balance: -amount
                 }
             })
-        
-            const result = await withdrawRequestCollection.updateOne({_id}, {
+
+            await usersCollection.updateOne({role: 1}, {
+                $inc: {system_balance: -amount}
+            })
+
+            const result = await withdrawRequestCollection.updateOne({ _id }, {
                 $set: {
                     status: 'approved'
                 }
             })
-            
+
             res.send(result);
         })
 
         // load withdraw requests
-        app.get("/withdraw-requests", verifyToken, verifyAdmin, async(req, res)=>{
+        app.get("/withdraw-requests", verifyToken, verifyAdmin, async (req, res) => {
             const result = await withdrawRequestCollection.find().toArray();
             res.send(result);
         })
 
         // send withdraw request
-        app.post("/withdraw-request", verifyToken, async(req, res)=>{
+        app.post("/withdraw-request", verifyToken, async (req, res) => {
             const email = req.user.email;
             const amount = parseInt(req.body.amount);
-            const getAgent = await usersCollection.findOne({email}, {projection: {balance: 1}});
-            if(getAgent.balance<amount){
-                return res.send({err: true, message: "Insufficient Balance!"});
+            const getAgent = await usersCollection.findOne({ email }, { projection: { balance: 1 } });
+            if (getAgent.balance < amount) {
+                return res.send({ err: true, message: "Insufficient Balance!" });
             }
-            const result = await withdrawRequestCollection.insertOne({requestedBy: email, amount, status: 'pending'})
+            const result = await withdrawRequestCollection.insertOne({ requestedBy: email, amount, status: 'pending' })
             res.send(result);
         })
 
         // Request for money by agent to admin
-        app.post("/request-money", verifyToken, async(req, res)=>{
+        app.post("/request-money", verifyToken, async (req, res) => {
             const email = req.user.email;
             const result = await moneyRequestsCollection.insertOne({
                 requestedBy: email,
@@ -392,9 +433,10 @@ async function run() {
         // balance inquiry
         app.get("/balance", verifyToken, async (req, res) => {
             const email = req.user.email;
+            const type = req.query.type;
             const result = await usersCollection.findOne({ email }, {
                 projection: {
-                    balance: 1
+                    [type]: 1
                 }
             });
 
@@ -409,17 +451,18 @@ async function run() {
             const nidQuery = { nid: data.nid }
 
             const emailRes = await usersCollection.findOne(emailQuery);
-            if (emailRes) return res.send({ err: true, duplicateEmail: true })
+            if (emailRes) return res.send({ err: true, msg: "Email already exists!" })
 
             const mobileRes = await usersCollection.findOne(mobileQuery);
-            if (mobileRes) return res.send({ err: true, duplicateMobile: true })
+            if (mobileRes) return res.send({ err: true, msg: "Mobile number already exists!" })
 
             const nidRes = await usersCollection.findOne(nidQuery);
-            if (nidRes) return res.send({ err: true, duplicateNid: true })
+            if (nidRes) return res.send({ err: true, msg: "NID is already used!" })
 
             const isUser = data.ac_type === 'user';
             data.role = isUser ? 3 : 2;
-            data.balance = isUser ? 40 : 100000;
+            const bonus = isUser ? 40 : 100000;
+            data.balance = bonus;
             !isUser && (data.income = 0);
 
             data.status = isUser ? 'active' : 'pending';
@@ -427,6 +470,13 @@ async function run() {
             const salt = bcrypt.genSaltSync(10);
             data.pin = bcrypt.hashSync(data.pin, salt);
             const result = await usersCollection.insertOne(data);
+
+            await usersCollection.updateOne({ role: 1 }, {
+                $inc: {
+                    system_balance: bonus
+                }
+            })
+
             res.send(result);
         })
 
@@ -455,12 +505,12 @@ async function run() {
             }
 
             delete result.pin;
-            jwtInit(req, res).send(result);
+            const jwtRes = await jwtInit(req, res);
+            jwtRes.send(result);
         })
 
         // Create JWT after sign in
         app.post('/jwt', async (req, res) => {
-            const user = req.user;
             const token = req?.cookies?.token;
             if (!token) {
                 return res.send({});
@@ -474,14 +524,26 @@ async function run() {
 
                 const query = { email: user.email }
                 const result = await usersCollection.findOne(query);
-                if (!result) return res.status(404);
+                if (!result || token !== result?.token) {
+
+                    return res.clearCookie('token', {
+                        httpOnly: true,
+                        secure: process.env.NODE_ENV === 'production',
+                        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict'
+                    }).status(404).send({ message: 'Unauthenticated' });
+                }
                 res.send(result);
             })
-
         })
 
         // Clear cookie after logging out
-        app.post('/logout', (req, res) => {
+        app.post('/logout', verifyToken, async (req, res) => {
+            const email = req.user.email;
+            await usersCollection.updateOne({ email }, {
+                $set: {
+                    token: ""
+                }
+            })
             res.clearCookie('token', {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
